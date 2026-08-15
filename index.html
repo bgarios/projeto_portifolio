@@ -1,0 +1,310 @@
+<!--
+  ============================================================
+  PAINEL DE DADOS AO VIVO — pipeline de portfólio
+  ------------------------------------------------------------
+  O que esse arquivo faz:
+  1) Busca o CSV publicado do Google Sheets (texto puro, sempre
+     reflete a versão mais recente da planilha — "Publicar na Web")
+  2) Interpreta esse texto com PapaParse (biblioteca que entende
+     o formato CSV, incluindo vírgulas dentro de campos, aspas etc)
+     e transforma em array de objetos JS
+  3) Calcula algumas contagens simples (total de respostas,
+     quantas são sintéticas vs reais, time de futebol mais votado)
+  4) Renderiza um contador + gráfico de barra
+
+  Como plugar no teu projeto:
+  - Troca a constante GOOGLE_SHEETS_CSV_URL lá embaixo pelo link
+    de CSV publicado da tua planilha (Arquivo > Compartilhar >
+    Publicar na Web > formato CSV)
+  - Cola esse HTML inteiro (ou só a <section>) dentro da tua
+    página do GitHub Pages
+  ============================================================
+-->
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<title>Painel de Dados ao Vivo</title>
+<style>
+  /* ==========================================================
+     TOKENS DE DESIGN
+     Paleta pensada pra "console de dados": fundo grafite escuro
+     (não preto puro), texto quase-branco quente, e um único
+     accent âmbar pra marcar o que é "dado ao vivo" — como um
+     indicador de sinal de terminal, sem cair no clichê matrix.
+     Tipografia: uma mono pra números/labels técnicos (reforça
+     a ideia de "leitura de dado bruto"), e uma sans limpa pro
+     texto corrido.
+  ========================================================== */
+  :root{
+    --bg: #14171c;
+    --bg-panel: #1b1f26;
+    --border: #2a2f38;
+    --text: #eceef1;
+    --text-dim: #8b93a1;
+    --accent: #e8a33d;
+    --accent-dim: #6b5327;
+    --ok: #5fb894;
+  }
+
+  * { box-sizing: border-box; }
+
+  body{
+    margin:0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'Inter', -apple-system, sans-serif;
+    padding: 40px 20px;
+  }
+
+  .painel{
+    max-width: 780px;
+    margin: 0 auto;
+    background: var(--bg-panel);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    overflow: hidden;
+  }
+
+  .painel-header{
+    padding: 20px 24px;
+    border-bottom: 1px solid var(--border);
+    display:flex;
+    align-items:center;
+    justify-content: space-between;
+  }
+
+  .painel-titulo{
+    font-family: 'JetBrains Mono', 'Courier New', monospace;
+    font-size: 13px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--text-dim);
+  }
+
+  .status-pulso{
+    display:flex;
+    align-items:center;
+    gap:8px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 12px;
+    color: var(--ok);
+  }
+
+  .ponto-pulso{
+    width:7px; height:7px;
+    border-radius:50%;
+    background: var(--ok);
+    animation: pulsar 2s infinite;
+  }
+
+  @keyframes pulsar{
+    0%,100%{ opacity: 1; }
+    50%{ opacity: 0.3; }
+  }
+
+  .corpo{ padding: 28px 24px; }
+
+  .metricas{
+    display:grid;
+    grid-template-columns: repeat(auto-fit, minmax(140px,1fr));
+    gap: 16px;
+    margin-bottom: 28px;
+  }
+
+  .metrica-numero{
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 32px;
+    font-weight: 700;
+    color: var(--accent);
+    line-height: 1;
+  }
+
+  .metrica-label{
+    font-size: 12px;
+    color: var(--text-dim);
+    margin-top: 6px;
+  }
+
+  .grafico-titulo{
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 12px;
+    color: var(--text-dim);
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    margin-bottom: 12px;
+  }
+
+  .barra-linha{
+    display:flex;
+    align-items:center;
+    gap: 10px;
+    margin-bottom: 8px;
+    font-size: 13px;
+  }
+
+  .barra-nome{
+    width: 130px;
+    flex-shrink:0;
+    color: var(--text-dim);
+    text-align:right;
+  }
+
+  .barra-trilha{
+    flex:1;
+    background: var(--border);
+    border-radius: 4px;
+    height: 18px;
+    overflow:hidden;
+  }
+
+  .barra-preenchimento{
+    height:100%;
+    background: linear-gradient(90deg, var(--accent-dim), var(--accent));
+    border-radius: 4px;
+    transition: width 0.6s ease;
+  }
+
+  .barra-valor{
+    width: 24px;
+    font-family: 'JetBrains Mono', monospace;
+    color: var(--text-dim);
+    font-size: 12px;
+  }
+
+  .rodape-nota{
+    margin-top: 24px;
+    font-size: 11px;
+    color: var(--text-dim);
+    border-top: 1px solid var(--border);
+    padding-top: 14px;
+  }
+
+  .estado-carregando, .estado-erro{
+    padding: 40px 0;
+    text-align:center;
+    color: var(--text-dim);
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 13px;
+  }
+
+  .estado-erro{ color: #d97757; }
+</style>
+</head>
+<body>
+
+<section class="painel">
+  <div class="painel-header">
+    <span class="painel-titulo">Respostas do formulário // ao vivo</span>
+    <span class="status-pulso"><span class="ponto-pulso"></span>lendo onedrive</span>
+  </div>
+
+  <div class="corpo" id="corpo-painel">
+    <div class="estado-carregando" id="estado-carregando">buscando dados...</div>
+  </div>
+</section>
+
+<!-- PapaParse: biblioteca que sabe interpretar CSV de forma robusta -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.4.1/papaparse.min.js"></script>
+
+<script>
+// ============================================================
+// CONFIGURAÇÃO — troque pelo link de CSV publicado do Google Sheets
+// (Arquivo > Compartilhar > Publicar na Web > escolher a aba >
+// formato "Valores separados por vírgula (.csv)")
+// ============================================================
+const GOOGLE_SHEETS_CSV_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vRPTRxgsSAlLplAZ0U1AJaFiLjcqppsmSgbstyBvoD6Oi9zr6aXakdpUm3WJCy9Pg/pub?output=csv";
+async function carregarPainel() {
+  const elCorpo = document.getElementById("corpo-painel");
+
+  try {
+    // ----------------------------------------------------------
+    // 1) Busca o CSV como texto puro (não é binário, é só texto)
+    // ----------------------------------------------------------
+    const resposta = await fetch(GOOGLE_SHEETS_CSV_URL);
+    if (!resposta.ok) throw new Error("Falha ao buscar planilha: " + resposta.status);
+    const textoCSV = await resposta.text();
+
+    // ----------------------------------------------------------
+    // 2) PapaParse interpreta o texto CSV e devolve um array de
+    //    objetos, usando a primeira linha como nome das colunas
+    //    (header: true faz exatamente isso)
+    // ----------------------------------------------------------
+    const resultado = Papa.parse(textoCSV, { header: true, skipEmptyLines: true });
+    const respostas = resultado.data;
+
+    renderizarPainel(respostas, elCorpo);
+
+  } catch (erro) {
+    elCorpo.innerHTML = `<div class="estado-erro">não foi possível carregar os dados agora<br>(${erro.message})</div>`;
+  }
+}
+
+function renderizarPainel(respostas, elCorpo) {
+  // --------------------------------------------------------
+  // Métricas simples: total, quantas são sintéticas vs reais
+  // --------------------------------------------------------
+  const total = respostas.length;
+  // CSV sempre entrega valores como texto, então comparamos com a string "1"
+  const sinteticas = respostas.filter(r => r.dado_sintetico === "1").length;
+  const reais = total - sinteticas;
+
+  // --------------------------------------------------------
+  // Contagem de time de futebol, pra virar o "gráfico" de barra
+  // reduce aqui monta um objeto tipo { Flamengo: 34, Vasco: 12, ... }
+  // --------------------------------------------------------
+  const contagemTimes = respostas.reduce((acc, r) => {
+    const time = r.time_futebol || "Não informado";
+    acc[time] = (acc[time] || 0) + 1;
+    return acc;
+  }, {});
+
+  // ordena do time mais votado pro menos votado, pega top 5
+  const topTimes = Object.entries(contagemTimes)
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 5);
+
+  const maiorValor = topTimes.length ? topTimes[0][1] : 1;
+
+  // --------------------------------------------------------
+  // Monta o HTML final a partir dos dados calculados acima
+  // --------------------------------------------------------
+  elCorpo.innerHTML = `
+    <div class="metricas">
+      <div>
+        <div class="metrica-numero">${total}</div>
+        <div class="metrica-label">respostas no total</div>
+      </div>
+      <div>
+        <div class="metrica-numero">${reais}</div>
+        <div class="metrica-label">respostas reais</div>
+      </div>
+      <div>
+        <div class="metrica-numero">${sinteticas}</div>
+        <div class="metrica-label">geradas p/ demonstração</div>
+      </div>
+    </div>
+
+    <div class="grafico-titulo">Time de futebol — top 5</div>
+    ${topTimes.map(([nome, valor]) => `
+      <div class="barra-linha">
+        <span class="barra-nome">${nome}</span>
+        <div class="barra-trilha">
+          <div class="barra-preenchimento" style="width:${(valor / maiorValor) * 100}%"></div>
+        </div>
+        <span class="barra-valor">${valor}</span>
+      </div>
+    `).join("")}
+
+    <div class="rodape-nota">
+      Dados atualizados diretamente da planilha no OneDrive a cada carregamento da página.
+      Respostas geradas para demonstração estão marcadas e serão substituídas por respostas reais com o tempo.
+    </div>
+  `;
+}
+
+carregarPainel();
+</script>
+
+</body>
+</html>
